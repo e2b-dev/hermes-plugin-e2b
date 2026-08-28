@@ -1,0 +1,9 @@
+name: e2b
+version: 0.1.0
+description: Run Hermes terminal, file, and code-execution tools inside E2B cloud sandboxes
+author: hermes-plugin-e2b contributors
+kind: backend
+requires_env:
+  - E2B_API_KEY
+provides_tools: []
+provides_hooks: []

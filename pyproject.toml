@@ -1,0 +1,69 @@
+# This project is installed by `hermes plugins install`, which copies the
+# directory into ~/.hermes/plugins/. The distribution below exists so that
+# `pip install -e '.[test]'` can set up a development environment; it
+# deliberately installs no modules of its own (`py-modules = []`) because the
+# plugin's modules live at the repo root and would otherwise be published as
+# top-level names like `config` and `process`.
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[project]
+name = "hermes-plugin-e2b"
+version = "0.1.0"
+description = "E2B cloud-sandbox terminal backend for Hermes Agent"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+keywords = ["hermes-agent", "hermes-plugin", "e2b", "sandbox", "terminal-backend"]
+# No "License :: OSI Approved :: ..." classifier: PEP 639 supersedes it, and
+# setuptools>=77 rejects declaring both.
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+
+# Runtime dependency of the plugin. Hermes never installs plugin dependencies
+# for you (`_warn_python_dependencies` only prints a hint), so this is the
+# authoritative statement of what has to be present.
+#
+# The floor is the version this plugin was verified against by reading the
+# installed SDK source. Below 2.46 the create/list/lifecycle surface this
+# plugin depends on has not been checked.
+dependencies = ["e2b>=2.46,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/NousResearch/hermes-agent"
+"Terminal backend plugin guide" = "https://hermes-agent.nousresearch.com/docs/developer-guide/terminal-environment-plugin"
+"Original in-tree implementation" = "https://github.com/NousResearch/hermes-agent/pull/18348"
+
+[tool.pytest.ini_options]
+# importlib mode keeps the repo-root __init__.py — which is a Hermes plugin
+# package entry, not a test package — out of test collection.
+addopts = "-q --import-mode=importlib -m 'not live'"
+testpaths = ["tests"]
+markers = [
+    "live: hits the real E2B API and creates billable sandboxes (deselected by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+preview = true  # required for PLW1514 (unspecified-encoding), as in Hermes core
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "PLW1514"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLW1514"]

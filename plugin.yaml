@@ -1,5 +1,5 @@
 name: e2b
-version: 0.1.0
+version: 1.0.0
 description: Run Hermes terminal, file, and code-execution tools inside E2B cloud sandboxes
 author: hermes-plugin-e2b contributors
 kind: backend

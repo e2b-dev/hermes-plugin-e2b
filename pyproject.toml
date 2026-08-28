@@ -13,7 +13,7 @@ py-modules = []
 
 [project]
 name = "hermes-plugin-e2b"
-version = "0.1.0"
+version = "1.0.0"
 description = "E2B cloud-sandbox terminal backend for Hermes Agent"
 readme = "README.md"
 license = "MIT"
@@ -43,7 +43,7 @@ dependencies = ["e2b>=2.46,<3"]
 test = ["pytest>=8"]
 
 [project.urls]
-Homepage = "https://github.com/NousResearch/hermes-agent"
+Homepage = "https://github.com/e2b-dev/hermes-plugin-e2b"
 "Terminal backend plugin guide" = "https://hermes-agent.nousresearch.com/docs/developer-guide/terminal-environment-plugin"
 "Original in-tree implementation" = "https://github.com/NousResearch/hermes-agent/pull/18348"
 

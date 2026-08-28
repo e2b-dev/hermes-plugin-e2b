@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the plugin's own dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[test]'
+
+      - name: Install Hermes Agent
+        id: hermes
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          pip install -e /tmp/hermes-agent
+          echo "sha=$(git -C /tmp/hermes-agent rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Report the Hermes revision under test
+        if: steps.hermes.outcome == 'success'
+        run: echo "Validated against hermes-agent ${{ steps.hermes.outputs.sha }}"
+
+      # The suite needs Hermes importable: it subclasses BaseEnvironment and
+      # asserts against the real registry and dispatch ladder. A failed Hermes
+      # install is reported as a skip, never as a green run.
+      - name: Tests
+        if: steps.hermes.outcome == 'success'
+        run: pytest -q
+
+      - name: Fail if Hermes could not be installed
+        if: steps.hermes.outcome != 'success'
+        run: |
+          echo "::error::Could not install hermes-agent; the suite did not run."
+          exit 1
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check --diff .
+
+  plugin-doctor:
+    # Hermes' own plugin validator: manifest parsing, namespaced import,
+    # register(ctx), and a network block during registration — which is what
+    # enforces the "is_available()/probe() must be cheap, no network" rule.
+    # Blocking: it passes today, so a regression should stop the build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -e '.[test]'
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          pip install -e /tmp/hermes-agent
+      - run: hermes plugins doctor . --ci

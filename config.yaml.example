@@ -1,0 +1,56 @@
+# Example Hermes configuration for the E2B terminal backend.
+# Merge the parts you need into ~/.hermes/config.yaml.
+
+plugins:
+  enabled:
+    - e2b
+
+  entries:
+    e2b:
+      settings:
+        # E2B template name or id. Part of sandbox identity: a sandbox built
+        # from a different template is never adopted.
+        template: base
+
+        # Starting directory inside the sandbox. Replaced by the sandbox's
+        # real $HOME when a custom template uses a different one.
+        cwd: /home/user
+
+        # Baseline sandbox lease in seconds. Defaults to
+        # terminal.lifetime_seconds. Extended per command, never shortened.
+        # In persistent mode E2B pauses the sandbox when this runs out.
+        lease_seconds: 300
+
+        # Extra lease granted beyond a command's own timeout, so E2B's
+        # timeout action cannot fire while a command is still running.
+        command_grace_seconds: 30
+
+        # Set false to deny all egress from the sandbox.
+        # Part of sandbox identity: changing it gives you a new sandbox rather
+        # than re-attaching to one still running under the old policy.
+        allow_internet_access: true
+
+        # E2B's envd access-token protection. Leave on.
+        # Also part of sandbox identity, for the same reason.
+        secure: true
+
+        # Extra metadata stamped on every sandbox this plugin creates, at
+        # creation time. The plugin's own identity keys always take precedence.
+        # Not part of sandbox identity: changing it does not create a new
+        # sandbox, so an existing one keeps the labels it was created with.
+        metadata: {}
+
+terminal:
+  backend: e2b
+
+  # true  (default) — one sandbox per session scope, filesystem preserved
+  #                   across restarts; E2B pauses it when the lease expires.
+  # false           — a throwaway sandbox per session, destroyed on teardown.
+  container_persistent: true
+
+  # Idle window before Hermes reaps the environment. Also the default
+  # sandbox lease.
+  lifetime_seconds: 300
+
+  # Default per-command timeout in seconds.
+  timeout: 180

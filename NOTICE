@@ -1,0 +1,45 @@
+hermes-plugin-e2b
+=================
+
+This plugin adds an `e2b` terminal backend to Hermes Agent
+(https://github.com/NousResearch/hermes-agent) through the public
+terminal-environment provider plugin API. It ships as a standalone repository
+and makes no changes to Hermes core.
+
+
+Prior art and attribution
+-------------------------
+
+The E2B terminal backend for Hermes was first proposed and implemented as an
+in-tree backend by **Berkant Ay** (<berkantay.5@gmail.com>, GitHub: berkantay)
+in NousResearch/hermes-agent pull request #18348:
+
+    https://github.com/NousResearch/hermes-agent/pull/18348
+
+That work is the origin of this plugin. Hermes policy does not accept
+third-party product integrations into the core tree (CONTRIBUTING.md,
+"Third-Party Product Integrations: Ship as a Standalone Plugin"), and a Hermes
+maintainer invited a plugin-repo version of that pull request while leaving the
+pull request itself open for its author to decide:
+
+    https://github.com/NousResearch/hermes-agent/pull/18348#issuecomment-5404654390
+
+This repository is that plugin-repo version. It is a re-architecture rather
+than a port: the lifecycle, identity, and state models were redesigned against
+the public plugin contract introduced in PR #94400. Several E2B-specific
+insights are carried over from #18348 and are credited inline in the source
+where they apply.
+
+
+Derived material
+----------------
+
+Hermes Agent is distributed under the MIT License, Copyright (c) 2025 Nous
+Research. This plugin subclasses `tools.environments.base.BaseEnvironment` and
+uses `tools.environments.file_sync.FileSyncManager` from that project, and
+adapts small amounts of its code and documentation. The Hermes MIT license text
+and copyright line are reproduced in LICENSE.
+
+E2B is a product of FoundryLabs, Inc. The E2B Python SDK (`e2b` on PyPI) is
+used as a dependency and is not redistributed here. "E2B" is used only to name
+the service this plugin integrates with.

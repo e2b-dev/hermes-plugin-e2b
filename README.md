@@ -70,16 +70,29 @@ delete them from the E2B dashboard if you want them gone immediately.
 
 | | |
 |---|---|
-| Hermes Agent | any build with pluggable terminal backends (PR #94400 or later). Verified against `main` @ `4faa721d` (originally built against `1bbb6e5b`; the plugin/provider/terminal contract files are byte-identical between the two). |
+| Hermes Agent | any build with pluggable terminal backends (PR #94400 or later). Built against `main` @ `1bbb6e5b` and re-verified against `main` @ `e60983a6`. |
 | E2B Python SDK | `>=2.46,<3`. Verified against 2.46.0 by reading the installed source. |
 | Python | 3.11+ (Hermes' own floor) |
 
-Hermes has no plugin API version handshake — [native plugins are protected by
-behaviour, not a version
+Hermes has no plugin API version handshake for terminal backends — [native
+plugins are protected by behaviour, not a version
 number](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins).
-This plugin uses only documented `PluginContext` and provider-ABC surface, plus
+(A manifest may declare an `api_version`; the loader parses and stores it, but
+nothing gates a terminal backend on it.) This plugin uses only documented
+`PluginContext` and provider-ABC surface, plus
 `tools.environments.BaseEnvironment` and `FileSyncManager`, which the terminal
 backend guide names explicitly.
+
+That surface has been stable across the whole verification range: the provider
+ABC (`agent/terminal_env_provider.py`), the backend registry
+(`agent/terminal_env_registry.py`), `FileSyncManager`
+(`tools/environments/file_sync.py`), and the terminal-backend guide itself are
+byte-identical at `1bbb6e5b` and `e60983a6`, despite roughly 3,500 commits
+between them. `BaseEnvironment` changed additively only. What did move is the
+*consumer* code around that surface, which is why the
+[contract gaps](docs/contract-gaps.md) are re-checked against current `main`
+rather than merely re-hashed — all of them still stand, and none has been fixed
+upstream.
 
 The E2B floor is not conservative padding: it is the version whose
 `Sandbox.create` / `Sandbox.list` / `lifecycle` behaviour was read from source

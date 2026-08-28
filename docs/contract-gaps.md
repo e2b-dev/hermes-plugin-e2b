@@ -3,8 +3,20 @@
 Findings from building this plugin against
 `NousResearch/hermes-agent` `main` @ `1bbb6e5bce56e721ab685af4cd87df21bbff4d35`
 with `e2b` 2.46.0, re-verified against `main` @
-`4faa721d7d2b0cbd61fd668078aebe8f949fac79` (the plugin/provider/terminal
-contract files are byte-identical between the two).
+`e60983a69730c058ce772829df3273aee6de3889`.
+
+Every gap below was re-read against that tree rather than re-hashed: none has
+been fixed upstream, and the code references are current for it. Consumer
+files have moved a lot across the range (~3,500 commits), so line numbers
+changed even where behaviour did not.
+
+The *declarative* contract this plugin is built on did not move at all.
+`agent/terminal_env_provider.py` (the provider ABC),
+`agent/terminal_env_registry.py`, `tools/environments/file_sync.py`, and
+`website/docs/developer-guide/terminal-environment-plugin.md` are byte-identical
+at `1bbb6e5b` and `e60983a6`. `tools/environments/base.py` is the one contract
+file that changed, additively: it gained an `is_local` class attribute that
+defaults to `False`, which is already the correct value for a remote backend.
 
 Every item is something the plugin either works around in the open or accepts
 as a documented limitation. None of them is patched in Hermes core — per
@@ -22,9 +34,9 @@ Each gap lists the smallest generic seam that would close it.
 `:126` show `execute()` returning `{"output": str, "exit_code": int}`.
 
 **Code** — every core consumer reads `returncode`:
-`tools/terminal_tool.py:3635`, `tools/file_operations.py:948`,
-`tools/process_registry.py:1333`, `tools/tool_result_storage.py:190`,
-`tools/code_execution_tool.py:1177`. `exit_code` appears only in the JSON the
+`tools/terminal_tool.py:3645`, `tools/file_operations.py:996`,
+`tools/process_registry.py:1342`, `tools/tool_result_storage.py:190`,
+`tools/code_execution_tool.py:1350`. `exit_code` appears only in the JSON the
 terminal tool emits to the model.
 
 **Impact** — a plugin that follows the documented example reports **every
@@ -49,9 +61,13 @@ already returns `returncode`. Asserted in
 "the sandbox is isolated enough that dangerous-command approval prompts are
 skipped".
 
-**Code** — `tools/approval.py:3914` `_should_skip_container_guards()` matches a
-hardcoded tuple of built-in backend names. A repository-wide search for
-`provider_flag(..., "skip_container_guards")` returns nothing.
+**Code** — `tools/approval.py:3989` `_should_skip_container_guards()` matches a
+hardcoded tuple of built-in backend names (`singularity`, `modal`, `daytona`,
+`vercel_sandbox`, plus `docker` when it has no host bind-mounts). A
+repository-wide search for `provider_flag(..., "skip_container_guards")` still
+returns nothing. The predicate has since grown a `has_host_access` parameter to
+handle the Docker bind-mount case, which shows the question is being refined —
+but only ever for built-in names.
 
 **Impact** — a plugin sandbox is treated as *not* disposable, so the approval
 layer stays on for dangerous commands. This is fail-safe, not fail-open, so it
@@ -62,19 +78,20 @@ prompts that an equivalent built-in backend would not raise.
 `terminal_env_registry.provider_flag(env_type, "skip_container_guards", …)`
 for non-built-in names, the same way `_is_container_backend` already does.
 
-**What this plugin does** — declares the flag (so the behaviour arrives for
-free if core wires it up) and documents that approval prompts currently
-still appear.
+**What this plugin does** — resolves the flag to `True` (the ABC defaults
+`skip_container_guards` to `is_container`, which this provider declares), so
+the behaviour arrives for free if core wires it up, and documents that approval
+prompts currently still appear. Pinned by `tests/test_plugin_contract.py`.
 
 ---
 
 ## 3. Persistent scope is profile-scoped for Docker only
 
-**Code** — `tools/terminal_tool.py:_resolve_container_task_id` scopes the
-persistent environment cache key by *profile* only when
-`_docker_persistent_profile_scoped()` is true, which is gated on
-`TERMINAL_ENV == "docker"`. Every other backend — including all the built-in
-remote ones — lands on `session:<session_key>`.
+**Code** — `tools/terminal_tool.py:1458` `_resolve_container_task_id` scopes
+the persistent environment cache key by *profile* only when
+`_docker_persistent_profile_scoped()` (`:1407`) is true, which returns early
+unless `TERMINAL_ENV == "docker"`. Every other backend — including all the
+built-in remote ones — lands on `session:<session_key>`.
 
 **Impact** — with `container_persistent: true`, a gateway or dashboard session
 gets its own E2B sandbox rather than sharing one per profile the way persistent
@@ -102,11 +119,12 @@ unconditionally".
 
 **Code** — `tools/environments/local.py:_sanitize_subprocess_env` (terminal /
 `execute_code`) and `hermes_subprocess_env` (browser, CLI executors, …) both
-apply `_plugin_terminal_env_strip_keys()`. `_make_run_env` (line 1314), which
-builds the environment for `_LocalEnvironment._run_bash` at line 1826, does
-not.
+apply `_plugin_terminal_env_strip_keys()` (lines 598 and 757). `_make_run_env`
+(line 1414), which builds the environment for `_LocalEnvironment._run_bash` at
+line 1948, does not: it filters `_HERMES_PROVIDER_ENV_BLOCKLIST` and Hermes'
+own internal secrets, and a plugin's declared key is neither.
 
-**Reproduced** against a Hermes install with this plugin enabled:
+**Reproduced** against `e60983a6` with this plugin registered:
 
 ```
 registered strip keys: ['E2B_API_KEY']
@@ -131,9 +149,9 @@ nothing a plugin can do about a core spawn site.
 
 ## 5. Core builds an environment for the prompt probe and never reaps it
 
-**Code** — `agent/prompt_builder.py:_probe_remote_backend` calls
-`_create_environment(..., task_id="prompt-backend-probe")` directly, runs one
-`uname` command, and drops the object. It is never registered in
+**Code** — `agent/prompt_builder.py:1167` `_probe_remote_backend` calls
+`_create_environment(..., task_id="prompt-backend-probe")` directly (`:1246`),
+runs one `uname` command, and drops the object. It is never registered in
 `_active_environments`, so the idle reaper never sees it; only CPython
 refcounting reaching `BaseEnvironment.__del__` cleans it up.
 
@@ -156,7 +174,9 @@ matching and the probe falls back to a normal environment.
 
 ## 6. `FileSyncManager` reports neither success nor failure
 
-**Code** — `sync()` and `sync_back()` both return `None`. `sync()` catches every
+**Code** — `tools/environments/file_sync.py` is byte-identical across the whole
+verification range, so every reference in this section and in gap 7 is current.
+`sync()` and `sync_back()` both return `None`. `sync()` catches every
 exception, rolls its state back and logs `"file_sync: sync failed, rolled back
 state"` (`file_sync.py:241`); `sync_back()` retries three times and logs
 `"sync_back: all N attempts failed"` (`file_sync.py:289`). Neither re-raises.
@@ -206,7 +226,7 @@ files) are log-only. All of these constraints disappear the moment
 
 **Code** — `_sync_back_locked` (`file_sync.py:336`) takes an exclusive `flock`
 on `~/.hermes/.sync.lock`. `BaseEnvironment.__del__` calls `cleanup()`
-(`base.py:1523`), and every remote backend's `cleanup()` calls `sync_back()`.
+(`base.py:1540`), and every remote backend's `cleanup()` calls `sync_back()`.
 
 **Impact** — when the garbage collector finalises an unreferenced environment
 while another environment's pull is in flight on the same thread, the nested
@@ -227,9 +247,9 @@ backed by a thread-local guard that turns any nested pull into a no-op.
 
 ## 8. No streaming `ProcessHandle` is exported
 
-**Code** — `tools/environments/base._ThreadedProcessHandle` accepts only a
-blocking `exec_fn() -> (output, exit_code)` and writes the whole result into
-the pipe after the command finishes. A streaming variant (`stream_exec_fn`)
+**Code** — `tools/environments/base._ThreadedProcessHandle` (`base.py:488`)
+accepts only a blocking `exec_fn() -> (output, exit_code)` and writes the whole
+result into the pipe after the command finishes. A streaming variant (`stream_exec_fn`)
 was written for the in-tree E2B work but is a core change and never landed.
 
 **Impact** — every plugin backend whose SDK delivers output incrementally has
@@ -245,19 +265,19 @@ public `tools.environments.StreamingProcessHandle`.
 
 ## 9. Execute-time `EnvironmentConnectionError` is not rendered as degraded and does not evict
 
-**Code** — the terminal tool's degraded handler (`tools/terminal_tool.py`,
-`except EnvironmentConnectionError` after the tool body) renders
-`status: "degraded"` with the retry hint and evicts the cached environment via
-`_evict_environment_for_task`. But it is only reachable for errors raised
-*outside* the foreground execution loop — in practice, from
-`_create_environment`. An `EnvironmentConnectionError` raised by
+**Code** — the terminal tool's degraded handler
+(`tools/terminal_tool.py:3854`, `except EnvironmentConnectionError` after the
+tool body) renders `status: "degraded"` with the retry hint and evicts the
+cached environment via `_evict_environment_for_task` (`:3908`). But it is only
+reachable for errors raised *outside* the foreground execution loop — in
+practice, from `_create_environment`. An `EnvironmentConnectionError` raised by
 `env.execute()` on a cached environment is caught first by the loop's blanket
-`except Exception`: the command is retried up to three times (2s/4s/8s
+`except Exception` (`:3591`): the command is retried up to three times (2s/4s/8s
 backoff) against the same environment object, then reported as a generic
-`{"exit_code": -1, "error": "Command execution failed: …"}` — no `status`
-field, no `retry_hint`, no eviction. If the error text happens to contain
-"timeout" (an SDK `ReadTimeout`, say), the same handler misreports it as a
-command timeout with exit code 124.
+`{"exit_code": -1, "error": "Command execution failed: …"}` (`:3615`) — no
+`status` field, no `retry_hint`, no eviction. If the error text happens to
+contain "timeout" (an SDK `ReadTimeout`, say), the same handler misreports it as
+a command timeout with exit code 124.
 
 **Impact** — a backend that attaches lazily (this plugin: the sandbox is
 created/resumed on first `execute()`) never gets the degraded rendering or the
@@ -281,13 +301,13 @@ property that matters.
 
 | Gap | Evidence | Effect here |
 |---|---|---|
-| `image`, `ssh_config`, `local_config`, `host_cwd` are not forwarded to plugin factories | `tools/terminal_tool.py:2133` passes only `cwd`, `timeout`, `task_id`, `image`, `container_config`, and `image` is always `""` for plugin backends (`:2295`) | The E2B template comes from `plugins.entries.e2b.settings.template` instead of a `terminal.*` key |
-| `terminal.lifetime_seconds` is not in `container_config` | `_container_config_from_config` (`:1917`) omits it | Read from the `TERMINAL_LIFETIME_SECONDS` env var Hermes bridges |
-| Persistence is read off a private attribute | `is_persistent_env` reads `env._persistent` (`:2368`) | The environment sets `_persistent` |
-| `code_execution_tool.check_sandbox_requirements` never calls `provider.check_requirements()` | `tools/code_execution_tool.py:300` | `execute_code` can report available when the backend is not configured |
-| `hermes plugins install` rejects `manifest_version > 1` while the loader supports 2 | `hermes_cli/plugins_cmd.py:142` vs `hermes_cli/plugins.py:670` | This plugin ships a v1 manifest; `config_schema` and `python_dependencies` are unusable via the installer |
-| `file_tools._terminal_env_type_for_task` sniffs class names before reading `_hermes_backend_name` | `tools/file_tools.py:192` | The environment class must avoid the substrings `local`, `ssh`, `docker`, `singularity`, `modal`, `daytona` |
-| A plugin whose `__init__.py` mentions `MemoryProvider` in its first 8 KB is classified `exclusive` and never loads | `hermes_cli/plugins.py:927` | Only applies when `kind` is absent; this manifest sets `kind: backend` |
+| `image`, `ssh_config`, `local_config`, `host_cwd` are not forwarded to plugin factories | `tools/terminal_tool.py:2137` passes only `cwd`, `timeout`, `task_id`, `image`, `container_config`, and `image` is always `""` for plugin backends (`:2308`). `_create_environment` itself now also takes `host_cwd`, but does not pass it on | The E2B template comes from `plugins.entries.e2b.settings.template` instead of a `terminal.*` key |
+| `terminal.lifetime_seconds` is not in `container_config` | `_container_config_from_config` (`:1921`) omits it | Read from the `TERMINAL_LIFETIME_SECONDS` env var Hermes bridges |
+| Persistence is read off a private attribute | `is_persistent_env` reads `env._persistent` (`:2380`) | The environment sets `_persistent` |
+| `code_execution_tool.check_sandbox_requirements` never calls `provider.check_requirements()` | `tools/code_execution_tool.py:356` — it special-cases `vercel_sandbox` only | `execute_code` can report available when the backend is not configured |
+| `hermes plugins install` rejects `manifest_version > 1` while the loader supports 2 | `hermes_cli/plugins_cmd.py:145` (rejected at `:817`) vs `hermes_cli/plugins.py:728` | This plugin ships a v1 manifest; `config_schema` and `python_dependencies` are unusable via the installer |
+| `file_tools._terminal_env_type_for_task` sniffs class names before reading `_hermes_backend_name` | `tools/file_tools.py:175` | The environment class must avoid the substrings `local`, `ssh`, `docker`, `singularity`, `modal`, `daytona` |
+| A plugin whose `__init__.py` mentions `MemoryProvider` in its first 8 KB is classified `exclusive` and never loads | `hermes_cli/plugins.py:997` | Only applies when `kind` is absent; this manifest sets `kind: backend` |
 | `sync_back()` cannot map a remote file in a directory the host does not already sync | `_infer_host_path` (`file_sync.py:454`) infers a host path only by matching the *parent* of an existing mapping entry, so a file the agent creates in a brand-new subdirectory is logged as "no host mapping" and dropped | Sandbox-authored files in new subdirectories of `skills/`/`memories/` reach the host through this plugin's resume recovery rather than the teardown pull. Pinned by a characterisation test |
 
 ---
@@ -304,7 +324,10 @@ These looked like gaps and are not:
 - **File tools need filesystem methods on the environment.** They do not.
   `ShellFileOperations` drives everything through `execute()` as POSIX shell,
   so a backend that can run `bash` needs no `read_file`/`write_file` hooks.
-- **`e2b` is a reserved backend name.** It is not, on `main`. The abandoned
+- **`e2b` is a reserved backend name.** It is not, on `main`:
+  `BUILTIN_BACKEND_NAMES` (`agent/terminal_env_registry.py:40`) holds `local`,
+  `docker`, `singularity`, `modal`, `managed_modal`, `daytona`,
+  `vercel_sandbox`, and `ssh`. The abandoned
   in-tree branch's final commit adds it to `BUILTIN_BACKEND_NAMES`; if that ever
   lands, `register_provider` raises and `PluginContext` swallows the error as a
   warning, so the plugin would silently not register. Worth watching.

@@ -174,11 +174,22 @@ def test_core_policy_sites_classify_the_backend(hermes_install):
         from agent import prompt_builder
 
         result["is_container"] = terminal_tool._is_container_backend("e2b")
-        result["file_tools_container_paths"] = file_tools._uses_container_paths("default")
+        from pathlib import Path
+        home = Path(os.environ["HERMES_HOME"])
+        target = home / "host-target"
+        target.mkdir()
+        link = home / "sandbox-link"
+        link.symlink_to(target, target_is_directory=True)
+        sandbox_path = str(link / "file.txt")
+        result["file_tools_container_paths"] = (
+            str(file_tools._resolve_path_for_task(sandbox_path, "default")) == sandbox_path
+        )
         result["env_probe_remote"] = env_probe._plugin_backend_is_remote("e2b")
         result["skills_remote"] = skills_tool._is_remote_env_backend("e2b")
         result["prompt_remote"] = prompt_builder._plugin_backend_is_remote("e2b")
-        result["prompt_description"] = prompt_builder._plugin_backend_description("e2b")
+        from unittest.mock import patch
+        with patch.object(prompt_builder, "_probe_remote_backend", return_value=None):
+            result["prompt_hints"] = prompt_builder.build_environment_hints()
         result["stripped"] = sorted(local_env._plugin_terminal_env_strip_keys())
         # The terminal / execute_code spawn path is the one that matters: it is
         # what a model-authored command runs through.
@@ -193,7 +204,7 @@ def test_core_policy_sites_classify_the_backend(hermes_install):
     assert out["env_probe_remote"] is True
     assert out["skills_remote"] is True
     assert out["prompt_remote"] is True
-    assert out["prompt_description"] == "an E2B sandbox (Linux)"
+    assert "an E2B sandbox (Linux)" in out["prompt_hints"]
     assert "E2B_API_KEY" in out["stripped"]
     assert "E2B_API_KEY" not in out["sanitized_keys"]
     assert "PATH" in out["sanitized_keys"], "the sanitizer dropped everything"
@@ -388,17 +399,9 @@ def test_the_factory_produces_the_plugin_environment(hermes_install):
         hermes_install,
         _FAKE_SDK_PREAMBLE.format(tests_dir=tests_dir)
         + """
-from tools.terminal_tool import _create_environment, _get_env_config
+from tools.terminal_tool import ensure_task_env
 
-config = _get_env_config()
-env = _create_environment(
-    env_type="e2b",
-    image="",
-    cwd=config["cwd"],
-    timeout=config["timeout"],
-    container_config={"container_persistent": True},
-    task_id="default",
-)
+env = ensure_task_env("default")
 result["class_name"] = type(env).__name__
 result["backend_stamp"] = env._hermes_backend_name
 result["persistent"] = env._persistent

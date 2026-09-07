@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  HERMES_SHA: 0d86694fa7ec429ba2cce8c2be427a4549a375ba
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,7 +32,9 @@ jobs:
         id: hermes
         continue-on-error: true
         run: |
-          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          git init /tmp/hermes-agent
+          git -C /tmp/hermes-agent fetch --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_SHA"
+          git -C /tmp/hermes-agent checkout --detach FETCH_HEAD
           pip install -e /tmp/hermes-agent
           echo "sha=$(git -C /tmp/hermes-agent rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -74,6 +79,8 @@ jobs:
           python-version: "3.12"
       - run: |
           pip install -e '.[test]'
-          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          git init /tmp/hermes-agent
+          git -C /tmp/hermes-agent fetch --depth 1 https://github.com/NousResearch/hermes-agent.git "$HERMES_SHA"
+          git -C /tmp/hermes-agent checkout --detach FETCH_HEAD
           pip install -e /tmp/hermes-agent
       - run: hermes plugins doctor . --ci

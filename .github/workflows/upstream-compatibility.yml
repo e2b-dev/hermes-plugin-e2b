@@ -1,0 +1,29 @@
+name: Upstream compatibility
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies and Hermes main
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[test]'
+          git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          echo "Testing against hermes-agent $(git -C /tmp/hermes-agent rev-parse HEAD)"
+          pip install -e /tmp/hermes-agent
+      - name: Tests
+        run: pytest -q -m 'not live'
+      - name: Plugin Doctor
+        run: hermes plugins doctor . --ci

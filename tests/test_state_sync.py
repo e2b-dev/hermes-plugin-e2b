@@ -311,8 +311,10 @@ def test_a_host_deleted_credential_blocks_commands_until_the_delete_propagates(
     propagated. A command run in that window uses the revoked credential."""
     from hermes_plugin_e2b.errors import EnvironmentConnectionError
     from tools import credential_files
+    from tools.environments import file_sync
 
-    monkeypatch.setenv("HERMES_FORCE_FILE_SYNC", "1")
+    monkeypatch.delenv("HERMES_FORCE_FILE_SYNC", raising=False)
+    monkeypatch.setattr(file_sync, "_monotonic", lambda: 100.0)
     secret = hermes_home / "creds.json"
     secret.write_text('{"token": "live-token"}', encoding="utf-8")
     mounts = [{"host_path": str(secret), "container_path": "/root/.hermes/creds.json"}]
@@ -345,6 +347,88 @@ def test_a_host_deleted_credential_blocks_commands_until_the_delete_propagates(
     assert not any("echo hi" in c.cmd for c in sandbox.commands_run), (
         "a command ran while a revoked credential was still live in the sandbox"
     )
+
+    monkeypatch.setattr(sandbox.commands, "run", original_run)
+    calls_before_retry = len(sandbox.commands_run)
+    assert env.execute("echo deletion-propagated", timeout=10)["returncode"] == 0
+    assert any(
+        call.cmd == file_sync.quoted_rm_command([remote_cred])
+        for call in sandbox.commands_run[calls_before_retry:]
+    )
+    assert env._dirty_state.reason() is None
+
+
+def test_credential_changes_are_synced_without_waiting_or_reuploading_unchanged_files(
+    fake, hermes_home, monkeypatch
+):
+    from tools import credential_files
+    from tools.environments import file_sync
+
+    monkeypatch.delenv("HERMES_FORCE_FILE_SYNC", raising=False)
+    monkeypatch.setattr(file_sync, "_monotonic", lambda: 100.0)
+    secret = hermes_home / "creds.json"
+    secret.write_text("old-token", encoding="utf-8")
+    monkeypatch.setattr(
+        credential_files,
+        "get_credential_file_mounts",
+        lambda: [{"host_path": str(secret), "container_path": "/root/.hermes/creds.json"}],
+    )
+    env = make_env()
+    env._ensure_ready()
+    sandbox = fake.only()
+    remote = f"{env.remote_hermes_home}/creds.json"
+
+    secret.write_text("new-rotated-token", encoding="utf-8")
+    assert env.execute("echo rotated", timeout=10)["returncode"] == 0
+    assert sandbox.files_written[remote] == b"new-rotated-token"
+    calls = len(sandbox.write_files_calls)
+    assert env.execute("echo unchanged", timeout=10)["returncode"] == 0
+    assert len(sandbox.write_files_calls) == calls
+
+
+def test_transient_upload_open_failure_blocks_the_command_and_retries(
+    fake, hermes_home, monkeypatch
+):
+    import builtins
+
+    from hermes_plugin_e2b.errors import EnvironmentConnectionError
+    from tools import credential_files
+
+    # Isolate upload failure from the manager's rate limit.
+    monkeypatch.setenv("HERMES_FORCE_FILE_SYNC", "1")
+    secret = hermes_home / "creds.json"
+    secret.write_text("old-token", encoding="utf-8")
+    monkeypatch.setattr(
+        credential_files,
+        "get_credential_file_mounts",
+        lambda: [{"host_path": str(secret), "container_path": "/root/.hermes/creds.json"}],
+    )
+    env = make_env()
+    env._ensure_ready()
+    sandbox = fake.only()
+    remote = f"{env.remote_hermes_home}/creds.json"
+    secret.write_text("new-rotated-token", encoding="utf-8")
+    real_open = builtins.open
+    failed = False
+
+    def fail_once(path, mode="r", *args, **kwargs):
+        nonlocal failed
+        if str(path) == str(secret) and mode == "rb" and not failed:
+            failed = True
+            raise PermissionError("temporary credential read failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fail_once)
+    with pytest.raises(EnvironmentConnectionError):
+        env.execute("echo must-not-run", timeout=10)
+    assert failed
+    assert not any("must-not-run" in c.cmd for c in sandbox.commands_run)
+    assert sandbox.files_written[remote] == b"old-token"
+    assert env._dirty_state.reason() is not None
+
+    assert env.execute("echo retry-upload", timeout=10)["returncode"] == 0
+    assert sandbox.files_written[remote] == b"new-rotated-token"
+    assert env._dirty_state.reason() is None
 
 
 def test_a_failed_teardown_pull_is_reported_as_an_error(fake, hermes_home, caplog):
@@ -600,6 +684,135 @@ def test_a_divergent_file_is_preserved_rather_than_overwritten(fake, hermes_home
     assert quarantined, "the sandbox version was discarded"
     assert quarantined[0].read_text(encoding="utf-8") == "# remote-v2\n"
     assert any("differ between this host" in r.message for r in caplog.records)
+
+
+def test_repeated_recovery_preserves_distinct_conflicts_without_duplicate_copies(fake, hermes_home):
+    import hashlib
+
+    host_file = hermes_home / "skills/demo/SKILL.md"
+    host_content = host_file.read_bytes()
+    env = make_env()
+    env._ensure_ready()
+    sandbox = fake.only()
+    remote_file = f"{env.remote_hermes_home}/skills/demo/SKILL.md"
+    quarantine = hermes_home / "cache/e2b-recovered"
+    original_copy = quarantine / sandbox.sandbox_id / "skills/demo/SKILL.md"
+
+    try:
+        for content in ("remote-v2", "remote-v3", "remote-v3"):
+            edit_in_sandbox(sandbox, remote_file, content)
+            # A crash skips the pull; the next attachment must preserve its snapshot.
+            env.cleanup(sync_state=False)
+            env = make_env()
+            env._ensure_ready()
+            assert host_file.read_bytes() == host_content
+            assert sandbox.files_written[remote_file] == host_content
+            assert original_copy.read_text(encoding="utf-8") == "remote-v2"
+
+        assert sorted(p.read_bytes() for p in quarantine.rglob("SKILL.md")) == [
+            b"remote-v2",
+            b"remote-v3",
+        ]
+        digest = hashlib.sha256(b"remote-v3").hexdigest()
+        assert (
+            quarantine / f"{sandbox.sandbox_id}-{digest}" / "skills/demo/SKILL.md"
+        ).read_bytes() == b"remote-v3"
+    finally:
+        env.cleanup(sync_state=False)
+
+
+@pytest.mark.parametrize("obstacle", ["symlink", "credential", "different_content"])
+def test_quarantine_versions_fail_closed_on_unsafe_or_occupied_destinations(
+    fake, hermes_home, monkeypatch, obstacle
+):
+    import hashlib
+
+    from hermes_plugin_e2b.errors import EnvironmentConnectionError
+
+    env = make_env()
+    env._ensure_ready()
+    sandbox = fake.only()
+    remote = f"{env.remote_hermes_home}/skills/demo/SKILL.md"
+    edit_in_sandbox(sandbox, remote, "remote-v2")
+    env.cleanup(sync_state=False)
+    env = make_env()
+    env._ensure_ready()
+    edit_in_sandbox(sandbox, remote, "remote-v3")
+    env.cleanup(sync_state=False)
+
+    quarantine = hermes_home / "cache/e2b-recovered"
+    digest = hashlib.sha256(b"remote-v3").hexdigest()
+    version_dir = quarantine / f"{sandbox.sandbox_id}-{digest}"
+    destination = version_dir / "skills/demo/SKILL.md"
+    if obstacle == "symlink":
+        protected = hermes_home / "credentials"
+        protected.mkdir()
+        version_dir.symlink_to(protected, target_is_directory=True)
+    elif obstacle == "credential":
+        _register_credential(monkeypatch, destination)
+    else:
+        destination.parent.mkdir(parents=True)
+        destination.write_text("previously-preserved", encoding="utf-8")
+
+    env = make_env()
+    try:
+        with pytest.raises(EnvironmentConnectionError, match="state recovery"):
+            env._ensure_ready()
+        assert sandbox.files_written[remote] == b"remote-v3"
+        assert (
+            quarantine / sandbox.sandbox_id / "skills/demo/SKILL.md"
+        ).read_bytes() == b"remote-v2"
+        if obstacle == "symlink":
+            assert not list(protected.iterdir())
+        elif obstacle == "credential":
+            assert destination.read_text(encoding="utf-8") == '{"token": "host-value"}'
+        else:
+            assert destination.read_bytes() == b"previously-preserved"
+    finally:
+        env.cleanup(sync_state=False)
+
+
+def test_failed_quarantine_write_keeps_remote_state_and_can_be_retried(
+    fake, hermes_home, monkeypatch
+):
+    import shutil
+    from types import SimpleNamespace
+
+    import hermes_plugin_e2b.environment as environment
+    from hermes_plugin_e2b.errors import EnvironmentConnectionError
+
+    env = make_env()
+    env._ensure_ready()
+    sandbox = fake.only()
+    remote = f"{env.remote_hermes_home}/skills/demo/SKILL.md"
+    edit_in_sandbox(sandbox, remote, "remote-v2")
+    env.cleanup(sync_state=False)
+    env = make_env()
+    original_copy = shutil.copyfileobj
+
+    def fail_copy(source, target, *args, **kwargs):
+        target.write(b"partial")
+        raise OSError("quarantine write failed")
+
+    try:
+        # Limit failure injection to the quarantine copy, not tar extraction.
+        monkeypatch.setattr(
+            environment,
+            "shutil",
+            SimpleNamespace(copyfileobj=fail_copy, copystat=shutil.copystat, copy2=shutil.copy2),
+        )
+        with pytest.raises(EnvironmentConnectionError, match="state recovery"):
+            env._ensure_ready()
+        assert sandbox.files_written[remote] == b"remote-v2"
+        assert not list((hermes_home / "cache/e2b-recovered").rglob("SKILL.md"))
+
+        environment.shutil.copyfileobj = original_copy
+        env._ensure_ready()
+        copies = list((hermes_home / "cache/e2b-recovered").rglob("SKILL.md"))
+        assert len(copies) == 1
+        assert copies[0].read_bytes() == b"remote-v2"
+    finally:
+        env.cleanup(sync_state=False)
 
 
 def test_recovery_never_creates_a_host_credential_file(fake, hermes_home):

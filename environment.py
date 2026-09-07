@@ -77,6 +77,7 @@ sandbox, and the actual destruction for an ephemeral one.
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import os
 import shlex
@@ -892,6 +893,8 @@ class E2BEnvironment(BaseEnvironment):
         self._resolve_remote_paths()
         self._sync_manager = FileSyncManager(
             get_files_fn=lambda: iter_sync_files(self.remote_hermes_home),
+            # Every writer command must observe host changes, including credential deletions.
+            sync_interval=0,
             upload_fn=_watched(self._upload_one),
             delete_fn=_watched(self._delete_many),
             bulk_upload_fn=_watched(self._upload_many),
@@ -1467,11 +1470,38 @@ class E2BEnvironment(BaseEnvironment):
     def _park_in_quarantine(
         self, source: Path, host_only: _HostOnlyPaths, root: str, relative: Path
     ) -> Path:
-        """Copy a recovered file somewhere inert and return where it went."""
-        destination = self._quarantine_path(host_only, root, relative)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return destination
+        """Preserve distinct copies, reusing an identical quarantined version."""
+        try:
+            with source.open("rb") as incoming:
+                digest = hashlib.file_digest(incoming, "sha256").hexdigest()
+            for version in (None, digest):
+                destination = self._quarantine_path(host_only, root, relative, version=version)
+                if destination.exists():
+                    if destination.is_file():
+                        with destination.open("rb") as existing:
+                            if hashlib.file_digest(existing, "sha256").hexdigest() == digest:
+                                return destination
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                # Exclusive creation also refuses a destination that appeared after the check.
+                with destination.open("xb") as parked:
+                    try:
+                        with source.open("rb") as incoming:
+                            shutil.copyfileobj(incoming, parked)
+                        parked.flush()
+                    except BaseException:
+                        destination.unlink()
+                        raise
+                shutil.copystat(source, destination)
+                return destination
+        except OSError as exc:
+            raise RuntimeError(
+                f"could not preserve the quarantine copy of {Path(root) / relative}: {exc}"
+            ) from exc
+        raise RuntimeError(
+            f"the quarantine version for {Path(root) / relative} is occupied by different "
+            "content; refusing to overwrite it. Move that entry aside and retry."
+        )
 
     def _quarantine_root(self, host_only: _HostOnlyPaths) -> Path:
         """The one tree quarantine may write into: its canonical location.
@@ -1509,7 +1539,9 @@ class E2BEnvironment(BaseEnvironment):
             )
         return canonical
 
-    def _quarantine_path(self, host_only: _HostOnlyPaths, root: str, relative: Path) -> Path:
+    def _quarantine_path(
+        self, host_only: _HostOnlyPaths, root: str, relative: Path, *, version: str | None = None
+    ) -> Path:
         """Where one remote copy is parked, verified inside the quarantine tree.
 
         The boundary is the quarantine tree itself, not the Hermes home. The
@@ -1527,7 +1559,10 @@ class E2BEnvironment(BaseEnvironment):
         fix, and the failure is confined to this scope's bring-up.
         """
         quarantine_root = self._quarantine_root(host_only)
-        candidate = quarantine_root / (self._sandbox_id or "unknown") / root / relative
+        directory = self._sandbox_id or "unknown"
+        if version is not None:
+            directory = f"{directory}-{version}"
+        candidate = quarantine_root / directory / root / relative
         # Two things have to hold. The destination must stay inside the
         # verified quarantine tree — any symlink that redirects it, into
         # credentials or another in-home tree or out of the home, leaves that
@@ -1944,14 +1979,7 @@ class E2BEnvironment(BaseEnvironment):
             entries = []
             try:
                 for host_path, remote_path in batch:
-                    try:
-                        handle = open(host_path, "rb")
-                    except OSError as exc:
-                        # Cache files come and go while a session runs. Failing
-                        # the batch would roll back the whole sync transaction
-                        # for one transient file.
-                        logger.debug("E2B: skipping %s (%s)", host_path, exc)
-                        continue
+                    handle = open(host_path, "rb")
                     handles.append(handle)
                     entries.append({"path": remote_path, "data": handle})
                 if entries:

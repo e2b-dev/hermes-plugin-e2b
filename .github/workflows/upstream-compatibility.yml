@@ -18,11 +18,13 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies and Hermes main
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip uv
           pip install -e '.[test]'
           git clone --depth 1 --branch main https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
           echo "Testing against hermes-agent $(git -C /tmp/hermes-agent rev-parse HEAD)"
-          pip install -e /tmp/hermes-agent
+          # Hermes resolves some dependency conflicts with [tool.uv] overrides,
+          # which uv applies only when run from the Hermes project directory.
+          cd /tmp/hermes-agent && uv pip install --python "$(command -v python)" -e .
       - name: Tests
         run: pytest -q -m 'not live'
       - name: Plugin Doctor
